@@ -52,6 +52,8 @@ relevant information.
   `temporalio-common` and every crate downstream of it on every build.
 * Autoscaled task pollers now preserve polling concurrency after transient cancellations and
   timeouts while still applying retry backoff.
+* Workflow `start_update` now waits for acceptance before returning a handle, retrying successful
+  responses below Accepted with the same encoded request and update ID.
 * Newly recorded local activity results preserve their activation grouping during replay, preventing
   workflows that wait for the first completion from receiving a result on the wrong activity handle.
   Histories recorded without grouping information retain the previous replay behavior.
