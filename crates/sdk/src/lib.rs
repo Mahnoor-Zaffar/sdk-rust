@@ -65,6 +65,9 @@ extern crate self as temporalio_sdk;
 pub mod activities;
 pub mod error;
 pub mod interceptors;
+/// Provides experimental OpenTelemetry tracing and context propagation.
+#[cfg(all(feature = "experimental", feature = "opentelemetry"))]
+pub mod opentelemetry;
 #[cfg(feature = "experimental")]
 /// Experimental APIs for configuring clients and workers with reusable plugins.
 pub mod plugins;
