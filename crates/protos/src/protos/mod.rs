@@ -1967,7 +1967,7 @@ pub mod temporal {
                                 parent_close_policy: s.parent_close_policy,
                                 inherit_build_id,
                                 priority: s.priority,
-                                versioning_override: None,
+                                versioning_override: s.versioning_override,
                             },
                         )
                     }
@@ -2868,6 +2868,11 @@ pub mod temporal {
                         }
                     }
                 }
+            }
+        }
+        pub mod nexusoperation {
+            pub mod v1 {
+                tonic::include_proto!("temporal.api.nexusoperation.v1");
             }
         }
         pub mod nexusservices {

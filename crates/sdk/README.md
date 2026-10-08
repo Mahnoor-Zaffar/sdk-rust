@@ -136,10 +136,52 @@ graph can disable defaults and opt back into the integrations they use.
 - `envconfig`: Support for loading connection settings from environment variables and `temporal.toml` files. |
 - `prometheus`: The Prometheus metrics exporter for `temporalio_common::telemetry`. |
 - `otel`: The OpenTelemetry metrics exporter for `temporalio_common::telemetry`. |
+- `opentelemetry`: Experimental OpenTelemetry tracing and cross-SDK W3C trace-context propagation. Requires the `experimental` feature. |
 - `experimental`: Rust SDK, client, and Workflow APIs that are still under development and may change or be removed. |
 - `testing`: The `testing` module, direct activity test support, and local Temporal CLI dev-server lifecycle management. |
 - `dynamic-tls`: Dynamic mTLS client-certificate resolution for transparent certificate rotation. |
 - `wasm-workflows`: Support WebAssembly workflow components through Wasmtime for workers and workflow replay. |
+
+### OpenTelemetry tracing
+
+Enable both the `experimental` and `opentelemetry` features. Configure an OpenTelemetry tracer
+provider. Add the plugin to the Temporal client. Workers that use the client automatically get the
+worker interceptors.
+
+```rust,no_run
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use temporalio_client::ClientOptions;
+use temporalio_sdk::opentelemetry::{OpenTelemetryPlugin, WorkflowIdGenerator};
+
+let tracer_provider = SdkTracerProvider::builder()
+    .with_id_generator(WorkflowIdGenerator::default())
+    .build();
+let plugin = OpenTelemetryPlugin::builder()
+    .tracer(tracer_provider.tracer("temporalio-sdk"))
+    .build();
+
+let client_options = ClientOptions::new("default")
+    .plugin(plugin)
+    .build();
+# let _ = client_options;
+# tracer_provider.shutdown().unwrap();
+```
+
+By default, the plugin uses the OpenTelemetry global tracer. It propagates W3C Trace Context and W3C
+Baggage in the cross-SDK `_tracer-data` Temporal header. The application controls the tracer
+provider and exporters. The application is also responsible for flushing and shutting down these
+components. Use `OpenTelemetryPlugin::builder()` to set a tracer or propagator for this plugin.
+The builder returns a `SimplePlugin` when you call `build()`.
+
+Use `WorkflowIdGenerator` in the tracer provider for Workflow spans. If application Workflow code
+creates spans, also wrap each span processor in `WorkflowSpanProcessor`. These types keep span IDs
+the same during execution and replay. They do not export application spans that start during
+replay.
+
+The integration traces client calls, Workflow execution, Workflow message handlers, and Activity
+execution. It also traces Workflow calls to Activities, local Activities, child Workflows, and
+Signals. The integration propagates context through Continue-as-New.
 
 ## Workflows in detail
 

@@ -33,12 +33,32 @@ relevant information.
 
 ## Unreleased
 
+## [0.10.0] - 2026-10-06
+
+### Added
+* Child workflow commands, including those submitted through the C bridge, support pinned,
+  auto-upgrade, and one-time worker deployment versioning overrides on Temporal Server 1.32.0
+  or later. Child-start resolutions distinguish invalid versioning overrides and missing
+  namespaces from other start failures.
+
 ### Fixed
+* Task-poll targets no longer decrease after cancelled or timed-out polls. Affected pollers still
+  retain their slot during backoff, while resource-exhaustion errors still reduce the target.
+* Replay now preserves which local activity results were delivered together for newly recorded
+  histories. This prevents local activity scheduling which was conditional on local activity
+  resolution order from assigning recorded results to different handles. Older markers keep their
+  existing behavior.
 * Workflow poll balancing now lets non-sticky pollers use capacity after sticky pollers reach their
   configured or autoscaled polling limit.
 * Worker heartbeats now report correct task-slot and poller counts when using buffered or custom
   metrics backends, including the Python SDK's `MetricBuffer`. Previously these counts could
   remain `0` because heartbeat accounting depended on reading labels from backend-owned attributes.
+* Every path that fails a workflow task now only reports the failure to server
+  on the task's first attempt, and later attempts are left to time out. Previously `PayloadsTooLarge`
+  failures and history fetch failures were re-reported on every attempt.
+* The `workflow_task_execution_failed` metric is now recorded for every failed workflow task
+  attempt, including attempts whose failure was not sent to the server, and its `failure_reason`
+  tag distinguishes `GrpcMessageTooLarge`, `PayloadsTooLarge`, and `RequestTooLarge` on every path.
 
 ## [0.9.0] - 2026-09-04
 

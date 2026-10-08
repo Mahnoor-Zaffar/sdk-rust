@@ -33,11 +33,46 @@ relevant information.
 
 ## Unreleased
 
+## [1.1.0] - 2026-10-06
+
+### Added
+* `WorkflowStartOptions::versioning_override` and
+  `WorkflowUpdateWithStartOptions::versioning_override` support pinned, auto-upgrade, and
+  one-time deployment routing for client-started workflows, including signal-with-start and
+  update-with-start. Pinned and auto-upgrade overrides require Temporal Server 1.28.0 or later;
+  one-time routing requires Temporal Server 1.32.0 or later.
+* Experimental `ChildWorkflowOptions::versioning_override` can pin, auto-upgrade, or one-time
+  route a child workflow independently of its parent, using `VersioningOverride`. Requires
+  Temporal Server 1.32.0 or later. Rejected overrides are reported as
+  `StartChildWorkflowExecutionFailedCause::InvalidVersioningOverride`; missing child namespaces
+  are now distinguished by `StartChildWorkflowExecutionFailedCause::NamespaceNotFound`.
+
 ### Fixed
+* `temporalio-common`'s build script now generates its payload-visitor implementations in a
+  stable order. The generated code was emitted in `HashSet`/`HashMap` iteration order, so its
+  content changed on every build and a compilation cache such as sccache missed
+  `temporalio-common` and every crate downstream of it on every build.
+* Autoscaled task pollers now preserve polling concurrency after transient cancellations and
+  timeouts while still applying retry backoff.
+* Workflow `start_update` now waits for acceptance before returning a handle, retrying successful
+  responses below Accepted with the same encoded request and update ID.
+* Newly recorded local activity results preserve their activation grouping during replay, preventing
+  workflows that wait for the first completion from receiving a result on the wrong activity handle.
+  Histories recorded without grouping information retain the previous replay behavior.
 * Sticky workflow backlog no longer prevents normal pollers from using capacity after sticky
   pollers reach their polling limit.
 * Workers using a custom metrics backend now report task-slot and poller counts correctly in
   worker heartbeats, rather than reporting zero when the backend does not expose its labels.
+* Workflow task failures are now reported to the server only on a task's first attempt, no
+  matter why the task failed. Previously a completion rejected for exceeding the worker's payload
+  size error limit, or a failure to fetch workflow history, was re-reported on every retry.
+* The `temporal_workflow_task_execution_failed` metric now counts every failed workflow task
+  attempt, including ones whose failure was not sent to the server, and tags size-related failures
+  with their specific `failure_reason` (`GrpcMessageTooLarge`, `PayloadsTooLarge`,
+  `RequestTooLarge`) on every path.
+* Adds experimental OpenTelemetry integration tracing client, Workflow, and Activity operations
+  and propagating trace context across Temporal invocations. Use `OpenTelemetryPlugin::builder()`
+  with the `experimental` and `opentelemetry` features to configure a `SimplePlugin`.
 
 ## [1.0.0] - 2026-09-04
 

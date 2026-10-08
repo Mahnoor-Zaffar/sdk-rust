@@ -65,6 +65,9 @@ extern crate self as temporalio_sdk;
 pub mod activities;
 pub mod error;
 pub mod interceptors;
+/// Provides experimental OpenTelemetry tracing and context propagation.
+#[cfg(all(feature = "experimental", feature = "opentelemetry"))]
+pub mod opentelemetry;
 #[cfg(feature = "experimental")]
 /// Experimental APIs for configuring clients and workers with reusable plugins.
 pub mod plugins;
@@ -102,9 +105,10 @@ pub use temporalio_workflow::{
     ChildWorkflowOptions, ContinueAsNewOptions, ExternalWorkflowHandle, LocalActivityOptions,
     MemoValue, ParentClosePolicy, SignalWorkflowOptions, StartChildWorkflowExecutionFailedCause,
     StartChildWorkflowOutput, StartedChildWorkflow, SyncWorkflowContext, TimerOptions, TimerResult,
-    VersioningIntent, WaitConditionOptions, WorkflowCancellationError, WorkflowCancellationToken,
-    WorkflowContext, WorkflowContextFuture, WorkflowContextKey, WorkflowContextView,
-    WorkflowIdReusePolicy, WorkflowRandomValue, WorkflowResult, WorkflowTermination,
+    VersioningIntent, VersioningOverride, WaitConditionOptions, WorkflowCancellationError,
+    WorkflowCancellationToken, WorkflowContext, WorkflowContextFuture, WorkflowContextKey,
+    WorkflowContextView, WorkflowIdReusePolicy, WorkflowRandomValue, WorkflowResult,
+    WorkflowTermination,
 };
 #[cfg(feature = "experimental")]
 pub use temporalio_workflow::{
