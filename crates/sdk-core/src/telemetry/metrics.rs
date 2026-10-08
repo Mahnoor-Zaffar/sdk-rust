@@ -6,7 +6,7 @@ use std::{
     collections::HashMap,
     fmt::{Debug, Display},
     iter::Iterator,
-    sync::{Arc, atomic::AtomicU64},
+    sync::Arc,
     time::Duration,
 };
 use temporalio_common::{
@@ -60,13 +60,44 @@ struct Instruments {
     nexus_task_execution_latency: HistogramDuration,
     nexus_task_execution_failed: Counter,
     worker_registered: Counter,
-    num_pollers: Gauge,
-    task_slots_available: Gauge,
-    task_slots_used: Gauge,
+    num_pollers: LabelledHeartbeatGauge,
+    task_slots_available: LabelledHeartbeatGauge,
+    task_slots_used: LabelledHeartbeatGauge,
     sticky_cache_hit: Counter,
     sticky_cache_miss: Counter,
     sticky_cache_size: Gauge,
     sticky_cache_forced_evictions: Counter,
+}
+
+struct HeartbeatLabel {
+    key: &'static str,
+    counts: HashMap<&'static str, HeartbeatMetric>,
+}
+
+/// Keeps label-to-count metadata in Core so gauge recording never needs to read
+/// attributes owned by the metrics backend.
+#[derive(Clone)]
+struct LabelledHeartbeatGauge {
+    gauge: Gauge,
+    label: Option<Arc<HeartbeatLabel>>,
+}
+
+impl LabelledHeartbeatGauge {
+    fn apply_heartbeat_labels(&mut self, new_labels: &[MetricKeyValue]) {
+        // Select the count from raw labels because the backend's attributes may be opaque or deferred.
+        if let Some(label) = &self.label
+            && let Some(attr) = new_labels.iter().rev().find(|attr| attr.key == label.key)
+        {
+            self.gauge
+                .set_in_memory(label.counts.get(attr.value.to_string().as_str()).cloned());
+        }
+    }
+}
+
+impl GaugeBase for LabelledHeartbeatGauge {
+    fn records(&self, value: u64) {
+        self.gauge.records(value);
+    }
 }
 
 impl MetricsContext {
@@ -115,9 +146,13 @@ impl MetricsContext {
         &self,
         new_attrs: impl IntoIterator<Item = MetricKeyValue>,
     ) -> Self {
+        let new_attrs: Vec<_> = new_attrs.into_iter().collect();
+        let mut instruments = (*self.instruments).clone();
+        for gauge in instruments.labelled_heartbeat_gauges() {
+            gauge.apply_heartbeat_labels(&new_attrs);
+        }
         let mut tm = self.meter.clone();
         tm.merge_attributes(new_attrs.into());
-        let mut instruments = (*self.instruments).clone();
         instruments.update_attributes(tm.get_default_attributes());
         Self {
             instruments: Arc::new(instruments),
@@ -322,6 +357,20 @@ impl Instruments {
                 .unwrap_or_else(|| meter.gauge(params))
         };
 
+        let labelled_gauge_with_in_mem = |params: MetricParameters| -> LabelledHeartbeatGauge {
+            let label = in_memory.as_ref().map(|metrics| {
+                Arc::new(
+                    metrics
+                        .get_labelled_metric(&params.name)
+                        .expect("Labelled heartbeat gauges must declare their label and counts"),
+                )
+            });
+            LabelledHeartbeatGauge {
+                gauge: meter.gauge(params),
+                label,
+            }
+        };
+
         let histogram_with_in_mem = |params: MetricParameters| -> HistogramDuration {
             in_memory
                 .clone()
@@ -475,17 +524,17 @@ impl Instruments {
                 description: "Count of the number of initialized workers".into(),
                 unit: "".into(),
             }),
-            num_pollers: gauge_with_in_mem(MetricParameters {
+            num_pollers: labelled_gauge_with_in_mem(MetricParameters {
                 name: NUM_POLLERS_NAME.into(),
                 description: "Current number of active pollers per queue type".into(),
                 unit: "".into(),
             }),
-            task_slots_available: gauge_with_in_mem(MetricParameters {
+            task_slots_available: labelled_gauge_with_in_mem(MetricParameters {
                 name: TASK_SLOTS_AVAILABLE_NAME.into(),
                 description: "Current number of available slots per task type".into(),
                 unit: "".into(),
             }),
-            task_slots_used: gauge_with_in_mem(MetricParameters {
+            task_slots_used: labelled_gauge_with_in_mem(MetricParameters {
                 name: TASK_SLOTS_USED_NAME.into(),
                 description: "Current number of used slots per task type".into(),
                 unit: "".into(),
@@ -513,6 +562,14 @@ impl Instruments {
                 unit: "".into(),
             }),
         }
+    }
+
+    fn labelled_heartbeat_gauges(&mut self) -> [&mut LabelledHeartbeatGauge; 3] {
+        [
+            &mut self.num_pollers,
+            &mut self.task_slots_available,
+            &mut self.task_slots_used,
+        ]
     }
 
     fn update_attributes(&mut self, new_attributes: &MetricAttributes) {
@@ -571,11 +628,9 @@ impl Instruments {
             .update_attributes(new_attributes.clone());
         self.worker_registered
             .update_attributes(new_attributes.clone());
-        self.num_pollers.update_attributes(new_attributes.clone());
-        self.task_slots_available
-            .update_attributes(new_attributes.clone());
-        self.task_slots_used
-            .update_attributes(new_attributes.clone());
+        for gauge in self.labelled_heartbeat_gauges() {
+            gauge.gauge.update_attributes(new_attributes.clone());
+        }
         self.sticky_cache_hit
             .update_attributes(new_attributes.clone());
         self.sticky_cache_miss
@@ -589,124 +644,101 @@ impl Instruments {
 
 #[derive(Default, Debug)]
 pub(crate) struct NumPollersMetric {
-    pub wft_current_pollers: Arc<AtomicU64>,
-    pub sticky_wft_current_pollers: Arc<AtomicU64>,
-    pub activity_current_pollers: Arc<AtomicU64>,
-    pub nexus_current_pollers: Arc<AtomicU64>,
+    pub wft_current_pollers: HeartbeatMetric,
+    pub sticky_wft_current_pollers: HeartbeatMetric,
+    pub activity_current_pollers: HeartbeatMetric,
+    pub nexus_current_pollers: HeartbeatMetric,
 }
 
 impl NumPollersMetric {
-    pub(crate) fn as_map(&self) -> HashMap<String, Arc<AtomicU64>> {
+    fn as_map(&self) -> HashMap<&'static str, HeartbeatMetric> {
         HashMap::from([
+            ("workflow_task", self.wft_current_pollers.clone()),
             (
-                "workflow_task".to_string(),
-                self.wft_current_pollers.clone(),
-            ),
-            (
-                "sticky_workflow_task".to_string(),
+                "sticky_workflow_task",
                 self.sticky_wft_current_pollers.clone(),
             ),
-            (
-                "activity_task".to_string(),
-                self.activity_current_pollers.clone(),
-            ),
-            ("nexus_task".to_string(), self.nexus_current_pollers.clone()),
+            ("activity_task", self.activity_current_pollers.clone()),
+            ("nexus_task", self.nexus_current_pollers.clone()),
         ])
     }
 }
 
 #[derive(Default, Debug)]
 pub(crate) struct SlotMetrics {
-    pub workflow_worker: Arc<AtomicU64>,
-    pub activity_worker: Arc<AtomicU64>,
-    pub nexus_worker: Arc<AtomicU64>,
-    pub local_activity_worker: Arc<AtomicU64>,
+    pub workflow_worker: HeartbeatMetric,
+    pub activity_worker: HeartbeatMetric,
+    pub nexus_worker: HeartbeatMetric,
+    pub local_activity_worker: HeartbeatMetric,
 }
 
 impl SlotMetrics {
-    pub(crate) fn as_map(&self) -> HashMap<String, Arc<AtomicU64>> {
+    fn as_map(&self) -> HashMap<&'static str, HeartbeatMetric> {
         HashMap::from([
-            ("WorkflowWorker".to_string(), self.workflow_worker.clone()),
-            ("ActivityWorker".to_string(), self.activity_worker.clone()),
-            ("NexusWorker".to_string(), self.nexus_worker.clone()),
-            (
-                "LocalActivityWorker".to_string(),
-                self.local_activity_worker.clone(),
-            ),
+            ("WorkflowWorker", self.workflow_worker.clone()),
+            ("ActivityWorker", self.activity_worker.clone()),
+            ("NexusWorker", self.nexus_worker.clone()),
+            ("LocalActivityWorker", self.local_activity_worker.clone()),
         ])
     }
 }
 
 #[derive(Default, Debug)]
 pub(crate) struct WorkerHeartbeatMetrics {
-    pub sticky_cache_size: Arc<AtomicU64>,
-    pub total_sticky_cache_hit: Arc<AtomicU64>,
-    pub total_sticky_cache_miss: Arc<AtomicU64>,
+    pub sticky_cache_size: HeartbeatMetric,
+    pub total_sticky_cache_hit: HeartbeatMetric,
+    pub total_sticky_cache_miss: HeartbeatMetric,
     pub num_pollers: NumPollersMetric,
     pub worker_task_slots_used: SlotMetrics,
     pub worker_task_slots_available: SlotMetrics,
-    pub workflow_task_execution_failed: Arc<AtomicU64>,
-    pub activity_execution_failed: Arc<AtomicU64>,
-    pub nexus_task_execution_failed: Arc<AtomicU64>,
-    pub local_activity_execution_failed: Arc<AtomicU64>,
+    pub workflow_task_execution_failed: HeartbeatMetric,
+    pub activity_execution_failed: HeartbeatMetric,
+    pub nexus_task_execution_failed: HeartbeatMetric,
+    pub local_activity_execution_failed: HeartbeatMetric,
     // Although latency metrics here are histograms, we are using the number of times they're called
     // to represent the `total_processed_tasks` heartbeat field
-    pub activity_execution_latency: Arc<AtomicU64>,
-    pub local_activity_execution_latency: Arc<AtomicU64>,
-    pub workflow_task_execution_latency: Arc<AtomicU64>,
-    pub nexus_task_execution_latency: Arc<AtomicU64>,
+    pub activity_execution_latency: HeartbeatMetric,
+    pub local_activity_execution_latency: HeartbeatMetric,
+    pub workflow_task_execution_latency: HeartbeatMetric,
+    pub nexus_task_execution_latency: HeartbeatMetric,
 }
 
 impl WorkerHeartbeatMetrics {
-    pub(crate) fn get_metric(&self, name: &str) -> Option<HeartbeatMetricType> {
-        match name {
-            "sticky_cache_size" => Some(HeartbeatMetricType::Individual(
-                self.sticky_cache_size.clone(),
-            )),
-            "sticky_cache_hit" => Some(HeartbeatMetricType::Individual(
-                self.total_sticky_cache_hit.clone(),
-            )),
-            "sticky_cache_miss" => Some(HeartbeatMetricType::Individual(
-                self.total_sticky_cache_miss.clone(),
-            )),
-            "num_pollers" => Some(HeartbeatMetricType::WithLabel {
-                label_key: "poller_type".to_string(),
-                metrics: self.num_pollers.as_map(),
-            }),
-            "worker_task_slots_used" => Some(HeartbeatMetricType::WithLabel {
-                label_key: "worker_type".to_string(),
-                metrics: self.worker_task_slots_used.as_map(),
-            }),
-            "worker_task_slots_available" => Some(HeartbeatMetricType::WithLabel {
-                label_key: "worker_type".to_string(),
-                metrics: self.worker_task_slots_available.as_map(),
-            }),
-            "workflow_task_execution_failed" => Some(HeartbeatMetricType::Individual(
-                self.workflow_task_execution_failed.clone(),
-            )),
-            "activity_execution_failed" => Some(HeartbeatMetricType::Individual(
-                self.activity_execution_failed.clone(),
-            )),
-            "nexus_task_execution_failed" => Some(HeartbeatMetricType::Individual(
-                self.nexus_task_execution_failed.clone(),
-            )),
-            "local_activity_execution_failed" => Some(HeartbeatMetricType::Individual(
-                self.local_activity_execution_failed.clone(),
-            )),
-            "activity_execution_latency" => Some(HeartbeatMetricType::Individual(
-                self.activity_execution_latency.clone(),
-            )),
-            "local_activity_execution_latency" => Some(HeartbeatMetricType::Individual(
-                self.local_activity_execution_latency.clone(),
-            )),
-            "workflow_task_execution_latency" => Some(HeartbeatMetricType::Individual(
-                self.workflow_task_execution_latency.clone(),
-            )),
-            "nexus_task_execution_latency" => Some(HeartbeatMetricType::Individual(
-                self.nexus_task_execution_latency.clone(),
-            )),
-            _ => None,
-        }
+    pub(crate) fn get_metric(&self, name: &str) -> Option<HeartbeatMetric> {
+        // Slot and poller gauges need a worker/poller type, not just a metric name.
+        // Their label keys and counts are supplied by get_labelled_metric instead.
+        Some(match name {
+            "sticky_cache_size" => self.sticky_cache_size.clone(),
+            "sticky_cache_hit" => self.total_sticky_cache_hit.clone(),
+            "sticky_cache_miss" => self.total_sticky_cache_miss.clone(),
+            "workflow_task_execution_failed" => self.workflow_task_execution_failed.clone(),
+            "activity_execution_failed" => self.activity_execution_failed.clone(),
+            "nexus_task_execution_failed" => self.nexus_task_execution_failed.clone(),
+            "local_activity_execution_failed" => self.local_activity_execution_failed.clone(),
+            "activity_execution_latency" => self.activity_execution_latency.clone(),
+            "local_activity_execution_latency" => self.local_activity_execution_latency.clone(),
+            "workflow_task_execution_latency" => self.workflow_task_execution_latency.clone(),
+            "nexus_task_execution_latency" => self.nexus_task_execution_latency.clone(),
+            _ => return None,
+        })
+    }
+
+    fn get_labelled_metric(&self, name: &str) -> Option<HeartbeatLabel> {
+        Some(match name {
+            NUM_POLLERS_NAME => HeartbeatLabel {
+                key: KEY_POLLER_TYPE,
+                counts: self.num_pollers.as_map(),
+            },
+            TASK_SLOTS_AVAILABLE_NAME => HeartbeatLabel {
+                key: KEY_WORKER_TYPE,
+                counts: self.worker_task_slots_available.as_map(),
+            },
+            TASK_SLOTS_USED_NAME => HeartbeatLabel {
+                key: KEY_WORKER_TYPE,
+                counts: self.worker_task_slots_used.as_map(),
+            },
+            _ => return None,
+        })
     }
 }
 
@@ -870,12 +902,9 @@ where
         self.calls_tx.send(MetricEvent::CreateAttributes {
             populate_into: ba.clone(),
             append_from: None,
-            attributes: opts.attributes.clone(),
+            attributes: opts.attributes,
         });
-        MetricAttributes::Buffer {
-            attrs: ba,
-            kvs: Arc::new(opts.attributes),
-        }
+        MetricAttributes::Buffer(ba)
     }
 
     fn extend_attributes(
@@ -883,25 +912,14 @@ where
         existing: MetricAttributes,
         attribs: NewAttributes,
     ) -> MetricAttributes {
-        if let MetricAttributes::Buffer { attrs, kvs } = existing {
-            let mut merged = (*kvs).clone();
-            for kv in attribs.attributes.iter() {
-                if let Some(existing_kv) = merged.iter_mut().find(|k| k.key == kv.key) {
-                    *existing_kv = kv.clone();
-                } else {
-                    merged.push(kv.clone());
-                }
-            }
+        if let MetricAttributes::Buffer(ol) = existing {
             let ba = BufferAttributes::hole();
             self.calls_tx.send(MetricEvent::CreateAttributes {
                 populate_into: ba.clone(),
-                append_from: Some(attrs),
+                append_from: Some(ol),
                 attributes: attribs.attributes,
             });
-            MetricAttributes::Buffer {
-                attrs: ba,
-                kvs: Arc::new(merged),
-            }
+            MetricAttributes::Buffer(ba)
         } else {
             dbg_panic!("Must use buffer attributes with a buffer metric implementation");
             existing
@@ -962,7 +980,7 @@ where
 {
     fn send(&self, value: MetricUpdateVal, attributes: &MetricAttributes) {
         let attributes = match attributes {
-            MetricAttributes::Buffer { attrs, .. } => attrs.clone(),
+            MetricAttributes::Buffer(l) => l.clone(),
             e => panic!(
                 "MetricsCallBuffer only works with MetricAttributes::Buffer, but used: {:?}",
                 e
@@ -1282,38 +1300,168 @@ mod tests {
     }
 
     #[test]
-    fn test_buffered_heartbeat_metrics_resolve_labels() {
-        // Regression test: worker-heartbeat slot/poller gauges are written by the
-        // in-memory tap only when the label can be resolved from the attributes. The
-        // buffered meter retains its key-value pairs core-side so that lookup works
-        // without reading the lang-side (Python-held) dict.
-        let call_buffer = Arc::new(MetricsCallBuffer::<DummyInstrumentRef>::new(100));
-        let telem_instance = telemetry_init(
-            TelemetryOptions::builder()
-                .metrics(call_buffer.clone() as Arc<dyn CoreMeter>)
-                .build(),
-        )
-        .unwrap();
-        let mc = MetricsContext::top_level("foo".to_string(), "q".to_string(), &telem_instance);
-        let in_mem = mc.in_memory_meter().unwrap();
+    fn heartbeat_gauges_select_counts_by_declared_labels() {
+        for (worker_label_key, workflow_label, activity_label) in [
+            (KEY_WORKER_TYPE, "WorkflowWorker", "ActivityWorker"),
+            ("slot_group", "first", "second"),
+        ] {
+            let call_buffer = Arc::new(MetricsCallBuffer::<DummyInstrumentRef>::new(1000));
+            let meter: Arc<dyn CoreMeter> = call_buffer.clone();
+            let telem_instance =
+                telemetry_init(TelemetryOptions::builder().metrics(meter).build()).unwrap();
+            let mut mc =
+                MetricsContext::top_level("foo".to_string(), "q".to_string(), &telem_instance);
+            if worker_label_key != KEY_WORKER_TYPE {
+                let instruments = Arc::make_mut(&mut mc.instruments);
+                for gauge in [
+                    &mut instruments.task_slots_available,
+                    &mut instruments.task_slots_used,
+                ] {
+                    let label = gauge.label.as_ref().unwrap();
+                    gauge.label = Some(Arc::new(HeartbeatLabel {
+                        key: worker_label_key,
+                        counts: HashMap::from([
+                            (workflow_label, label.counts["WorkflowWorker"].clone()),
+                            (activity_label, label.counts["ActivityWorker"].clone()),
+                        ]),
+                    }));
+                }
+            }
+            let in_mem = mc.in_memory_meter().unwrap();
+            let counts = || {
+                [
+                    &in_mem.worker_task_slots_available.workflow_worker,
+                    &in_mem.worker_task_slots_used.workflow_worker,
+                    &in_mem.num_pollers.wft_current_pollers,
+                    &in_mem.worker_task_slots_available.activity_worker,
+                    &in_mem.worker_task_slots_used.activity_worker,
+                    &in_mem.num_pollers.activity_current_pollers,
+                ]
+                .map(|metric| metric.load(Ordering::Relaxed))
+            };
 
-        mc.available_task_slots(100);
-        mc.record_num_pollers(5);
+            // No events are drained: heartbeat accounting must not require initialized attributes.
+            mc.available_task_slots(100);
+            mc.task_slots_used(100);
+            mc.record_num_pollers(5);
+            assert_eq!(counts(), [0; 6]);
 
-        let wf_ctx = mc.with_new_attrs([workflow_worker_type()]);
-        wf_ctx.available_task_slots(42);
+            let wf = mc.with_new_attrs([
+                MetricKeyValue::new(worker_label_key, workflow_label),
+                workflow_poller(),
+            ]);
+            let inherited = wf.with_new_attrs([MetricKeyValue::new("workflow_type", "my_wf")]);
+            inherited.available_task_slots(42);
+            inherited.task_slots_used(3);
+            inherited.record_num_pollers(7);
+            let unregistered_worker_type = "unregistered-worker-type-for-test";
+            let unregistered_poller_type = "unregistered-poller-type-for-test";
+            let activity = inherited.with_new_attrs([
+                MetricKeyValue::new(worker_label_key, unregistered_worker_type),
+                MetricKeyValue::new(worker_label_key, activity_label),
+                activity_poller(),
+            ]);
+            activity.available_task_slots(24);
+            activity.task_slots_used(4);
+            activity.record_num_pollers(8);
+            assert_eq!(counts(), [42, 3, 7, 24, 4, 8]);
 
-        let wf_poller = mc.with_new_attrs([workflow_poller()]);
-        wf_poller.record_num_pollers(7);
+            let unregistered = wf.with_new_attrs([
+                MetricKeyValue::new(worker_label_key, unregistered_worker_type),
+                MetricKeyValue::new(KEY_POLLER_TYPE, unregistered_poller_type),
+            ]);
+            unregistered.available_task_slots(999);
+            unregistered.task_slots_used(999);
+            unregistered.record_num_pollers(999);
+            assert_eq!(counts(), [42, 3, 7, 24, 4, 8]);
 
-        assert_eq!(
-            in_mem.worker_task_slots_available.as_map()["WorkflowWorker"].load(Ordering::Relaxed),
-            42
-        );
-        assert_eq!(
-            in_mem.num_pollers.as_map()["workflow_task"].load(Ordering::Relaxed),
-            7
-        );
+            wf.available_task_slots(43);
+            wf.task_slots_used(2);
+            wf.record_num_pollers(6);
+            assert_eq!(counts(), [43, 2, 6, 24, 4, 8]);
+
+            let mut attribute_sets: Vec<HashMap<String, String>> = Vec::new();
+            let mut emitted_updates = Vec::new();
+            for event in call_buffer.retrieve() {
+                match event {
+                    MetricEvent::CreateAttributes {
+                        populate_into,
+                        append_from,
+                        attributes,
+                    } => {
+                        let mut labels = append_from
+                            .as_ref()
+                            .map(|existing| {
+                                attribute_sets[DummyCustomAttrs::as_id(existing)].clone()
+                            })
+                            .unwrap_or_default();
+                        labels.extend(
+                            attributes
+                                .into_iter()
+                                .map(|attr| (attr.key, attr.value.to_string())),
+                        );
+                        populate_into
+                            .set(Arc::new(DummyCustomAttrs(attribute_sets.len())))
+                            .unwrap();
+                        attribute_sets.push(labels);
+                    }
+                    MetricEvent::Update {
+                        attributes,
+                        update: MetricUpdateVal::Value(value),
+                        ..
+                    } => {
+                        emitted_updates.push((
+                            value,
+                            attribute_sets[DummyCustomAttrs::as_id(&attributes)].clone(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            let expected = [
+                ([100, 100, 5], None, None, None),
+                (
+                    [42, 3, 7],
+                    Some(workflow_label),
+                    Some("workflow_task"),
+                    Some("my_wf"),
+                ),
+                (
+                    [24, 4, 8],
+                    Some(activity_label),
+                    Some("activity_task"),
+                    Some("my_wf"),
+                ),
+                (
+                    [999; 3],
+                    Some(unregistered_worker_type),
+                    Some(unregistered_poller_type),
+                    None,
+                ),
+                (
+                    [43, 2, 6],
+                    Some(workflow_label),
+                    Some("workflow_task"),
+                    None,
+                ),
+            ];
+            assert_eq!(emitted_updates.len(), expected.len() * 3);
+            for (updates, (values, worker_type, poller_type, workflow_type)) in
+                emitted_updates.chunks_exact(3).zip(expected)
+            {
+                for ((value, labels), expected_value) in updates.iter().zip(values) {
+                    assert_eq!(*value, expected_value);
+                    assert_eq!(
+                        labels.get(worker_label_key).map(String::as_str),
+                        worker_type
+                    );
+                    assert_eq!(labels.get(KEY_POLLER_TYPE).map(String::as_str), poller_type);
+                    assert_eq!(labels.get(KEY_WF_TYPE).map(String::as_str), workflow_type);
+                    assert_eq!(labels.get(KEY_NAMESPACE).map(String::as_str), Some("foo"));
+                    assert_eq!(labels.get(KEY_TASK_QUEUE).map(String::as_str), Some("q"));
+                }
+            }
+        }
     }
 
     #[test]

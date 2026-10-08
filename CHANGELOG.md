@@ -36,6 +36,8 @@ relevant information.
 ### Fixed
 * Sticky workflow backlog no longer prevents normal pollers from using capacity after sticky
   pollers reach their polling limit.
+* Workers using a custom metrics backend now report task-slot and poller counts correctly in
+  worker heartbeats, rather than reporting zero when the backend does not expose its labels.
 
 ## [1.0.0] - 2026-09-04
 

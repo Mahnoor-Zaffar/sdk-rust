@@ -158,12 +158,20 @@ fn assert_worker_environment(heartbeat: &WorkerHeartbeat) {
 // with `docker_` and set the `DOCKER_PROMETHEUS_RUNNING` env variable to run
 #[rstest::rstest]
 #[tokio::test]
-async fn docker_worker_heartbeat_basic(
-    #[values("otel", "prom", "no_metrics", "buffered")] backing: &str,
-) {
+async fn docker_worker_heartbeat_basic(#[values("otel", "prom")] backing: &str) {
     if env::var("DOCKER_PROMETHEUS_RUNNING").is_err() {
         return;
     }
+    worker_heartbeat_basic(backing).await;
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn worker_heartbeat_without_exporter(#[values("no_metrics", "buffered")] backing: &str) {
+    worker_heartbeat_basic(backing).await;
+}
+
+async fn worker_heartbeat_basic(backing: &str) {
     let telemopts = if backing == "no_metrics" || backing == "buffered" {
         TelemetryOptions::builder().build()
     } else {
