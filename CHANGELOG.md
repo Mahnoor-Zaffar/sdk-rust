@@ -33,6 +33,10 @@ relevant information.
 
 ## Unreleased
 
+### Fixed
+* Workers using a custom metrics backend now report task-slot and poller counts correctly in
+  worker heartbeats, rather than reporting zero when the backend does not expose its labels.
+
 ## [1.1.0] - 2026-10-06
 
 ### Added
@@ -61,8 +65,6 @@ relevant information.
   Histories recorded without grouping information retain the previous replay behavior.
 * Sticky workflow backlog no longer prevents normal pollers from using capacity after sticky
   pollers reach their polling limit.
-* Workers using a custom metrics backend now report task-slot and poller counts correctly in
-  worker heartbeats, rather than reporting zero when the backend does not expose its labels.
 * Workflow task failures are now reported to the server only on a task's first attempt, no
   matter why the task failed. Previously a completion rejected for exceeding the worker's payload
   size error limit, or a failure to fetch workflow history, was re-reported on every retry.
