@@ -808,10 +808,9 @@ impl Gauge {
     }
 
     /// Select the heartbeat count to update when this gauge records a value.
-    /// Other clones keep their existing counts. `None` disables heartbeat updates without
-    /// disabling the exported metric.
-    pub fn set_in_memory(&mut self, metric: Option<HeartbeatMetric>) {
-        self.in_memory = metric;
+    /// Other clones keep their existing counts.
+    pub fn set_in_memory(&mut self, metric: HeartbeatMetric) {
+        self.in_memory = Some(metric);
     }
 
     /// Record a `u64` gauge value with the given attributes.
@@ -1123,9 +1122,9 @@ mod tests {
         let original = Gauge::new_with_in_memory(Arc::new(NoOpInstrument), original_value.clone());
         original.records(1);
         let mut cloned = original.clone();
-        cloned.set_in_memory(Some(other_value.clone()));
+        cloned.set_in_memory(other_value.clone());
         let mut attributed = original.with_attributes(&attributes).unwrap();
-        attributed.set_in_memory(Some(other_value.clone()));
+        attributed.set_in_memory(other_value.clone());
 
         cloned.records(2);
         assert_eq!(original_value.load(Ordering::Relaxed), 1);
@@ -1139,11 +1138,11 @@ mod tests {
         assert_eq!(original_value.load(Ordering::Relaxed), 3);
         assert_eq!(other_value.load(Ordering::Relaxed), 4);
 
-        cloned.set_in_memory(None);
         cloned.records(5);
+        assert_eq!(other_value.load(Ordering::Relaxed), 5);
         cloned.record(6, &attributes);
         assert_eq!(original_value.load(Ordering::Relaxed), 3);
-        assert_eq!(other_value.load(Ordering::Relaxed), 4);
+        assert_eq!(other_value.load(Ordering::Relaxed), 6);
 
         attributed.records(7);
         assert_eq!(original_value.load(Ordering::Relaxed), 3);

@@ -87,9 +87,9 @@ impl LabelledHeartbeatGauge {
         // Select the count from raw labels because the backend's attributes may be opaque or deferred.
         if let Some(label) = &self.label
             && let Some(attr) = new_labels.iter().rev().find(|attr| attr.key == label.key)
+            && let Some(count) = label.counts.get(attr.value.to_string().as_str())
         {
-            self.gauge
-                .set_in_memory(label.counts.get(attr.value.to_string().as_str()).cloned());
+            self.gauge.set_in_memory(count.clone());
         }
     }
 }
@@ -1358,7 +1358,6 @@ mod tests {
             inherited.task_slots_used(3);
             inherited.record_num_pollers(7);
             let unregistered_worker_type = "unregistered-worker-type-for-test";
-            let unregistered_poller_type = "unregistered-poller-type-for-test";
             let activity = inherited.with_new_attrs([
                 MetricKeyValue::new(worker_label_key, unregistered_worker_type),
                 MetricKeyValue::new(worker_label_key, activity_label),
@@ -1369,14 +1368,15 @@ mod tests {
             activity.record_num_pollers(8);
             assert_eq!(counts(), [42, 3, 7, 24, 4, 8]);
 
-            let unregistered = wf.with_new_attrs([
+            let unregistered_poller_type = "unregistered-poller-type-for-test";
+            let unknown = wf.with_new_attrs([
                 MetricKeyValue::new(worker_label_key, unregistered_worker_type),
                 MetricKeyValue::new(KEY_POLLER_TYPE, unregistered_poller_type),
             ]);
-            unregistered.available_task_slots(999);
-            unregistered.task_slots_used(999);
-            unregistered.record_num_pollers(999);
-            assert_eq!(counts(), [42, 3, 7, 24, 4, 8]);
+            unknown.available_task_slots(5);
+            unknown.task_slots_used(2);
+            unknown.record_num_pollers(3);
+            assert_eq!(counts(), [5, 2, 3, 24, 4, 8]);
 
             wf.available_task_slots(43);
             wf.task_slots_used(2);
@@ -1436,7 +1436,7 @@ mod tests {
                     Some("my_wf"),
                 ),
                 (
-                    [999; 3],
+                    [5, 2, 3],
                     Some(unregistered_worker_type),
                     Some(unregistered_poller_type),
                     None,
